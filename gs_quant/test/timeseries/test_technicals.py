@@ -12,6 +12,8 @@ software distributed under the License is distributed on an
 KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations
 under the License.
+
+Portions copyright Matthew Busel. Licensed under Apache 2.0 license
 """
 
 import datetime as dt
@@ -231,6 +233,37 @@ def test_relative_strength_index_date_offset_window():
     result = relative_strength_index(increasing_series, "3d")
 
     assert_series_equal(result, expected, check_names=False, obj="Relative Strength Index date offset window")
+
+
+def test_smoothed_moving_average_and_rsi_fast_path_match_loop(monkeypatch):
+    pytest.importorskip("fin_primitives")
+    rng = np.random.default_rng(7)
+    dates = [d.date() for d in pd.bdate_range("2015-01-01", periods=300)]
+    prices = pd.Series(100 + rng.standard_normal(300).cumsum(), index=dates)
+    flat = pd.Series(5.0, index=dates[:40])
+    with_nan = prices.copy()
+    with_nan.iloc[50] = np.nan
+
+    cases = [
+        (prices, 14),
+        (prices, 2),
+        (prices, 1),
+        (prices, Window(10, 10)),
+        (prices, Window(10, 3)),
+        (prices, "1m"),
+        (flat, 14),
+        (with_nan, 14),
+        (prices.iloc[:16], 14),
+    ]
+    fast = {}
+    for i, (x, w) in enumerate(cases):
+        fast[i] = (smoothed_moving_average(x, w), relative_strength_index(x, w))
+
+    monkeypatch.setattr(technicals, "_fin_primitives_fast", None)
+    for i, (x, w) in enumerate(cases):
+        loop_smma, loop_rsi = smoothed_moving_average(x, w), relative_strength_index(x, w)
+        assert_series_equal(fast[i][0], loop_smma, check_freq=False, rtol=1e-12, obj=f"SMMA case {i}")
+        assert_series_equal(fast[i][1], loop_rsi, check_freq=False, rtol=1e-12, obj=f"RSI case {i}")
 
 
 def test_exponential_moving_average():

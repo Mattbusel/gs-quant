@@ -10,6 +10,7 @@
 # specific language governing permissions and limitations
 # under the License.
 #
+# Portions copyright Matthew Busel. Licensed under Apache 2.0 license
 #
 # Marquee Plot Service will attempt to make public functions (not prefixed with _) from this module available.
 # Such functions should be fully documented: docstrings should describe parameters and the return value, and provide
@@ -17,6 +18,7 @@
 from enum import Enum
 from typing import Union
 
+import numpy as np
 import pandas as pd
 import statsmodels.tsa.seasonal as seasonal
 import statsmodels.tsa.tsatools as tsatools
@@ -27,6 +29,12 @@ from ..errors import MqValueError
 from .algebra import subtract
 from .helper import Window, apply_ramp, normalize_window, plot_function
 from .statistics import exponential_std, mean, std
+
+try:
+    # Optional (pip install gs-quant[fast]): a compiled Wilder moving average for integer windows
+    from fin_primitives import fast as _fin_primitives_fast
+except ImportError:
+    _fin_primitives_fast = None
 
 """
 Technicals library is for technical analysis functions on timeseries, including moving averages,
@@ -142,6 +150,25 @@ def bollinger_bands(x: pd.Series, w: Union[Window, int, str] = Window(None, 0), 
     return pd.concat([lower, upper], axis=1)
 
 
+def _smoothed_moving_average_fast(x: pd.Series, w: Window) -> Union[pd.Series, None]:
+    """
+    Same result as the loop in smoothed_moving_average, computed by fin-primitives, or None when it does not apply.
+
+    For an integer window N whose ramp is also N (what an int w normalizes to), the loop starts at bar N with the
+    mean of bars 1..N and then applies the recursion, which is Wilder's moving average of x[1:].
+    """
+    if _fin_primitives_fast is None or not pd.api.types.is_numeric_dtype(x):
+        return None
+    window_size, ramp = w.w, w.r
+    if not (isinstance(window_size, int) and isinstance(ramp, int) and 0 < window_size == ramp < len(x)):
+        return None
+    values = x.to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        return None
+    smoothed = _fin_primitives_fast.rma(values[1:], window_size)[window_size - 1 :]
+    return pd.Series(smoothed, index=x.index[window_size:], name=x.name)
+
+
 @plot_function
 def smoothed_moving_average(x: pd.Series, w: Union[Window, int, str] = Window(None, 0)) -> pd.Series:
     """
@@ -179,6 +206,9 @@ def smoothed_moving_average(x: pd.Series, w: Union[Window, int, str] = Window(No
 
     """
     w = normalize_window(x, w)
+    fast_result = _smoothed_moving_average_fast(x, w)
+    if fast_result is not None:
+        return fast_result
     window_size = w.w
     ramp = w.r
     means = apply_ramp(mean(x, Window(window_size, 0)), w)
@@ -242,18 +272,12 @@ def relative_strength_index(x: pd.Series, w: Union[Window, int, str] = 14) -> pd
     moving_avg_gains = smoothed_moving_average(gains, w)
     moving_avg_losses = smoothed_moving_average(losses, w)
 
-    rsi_len = len(moving_avg_gains)
-    rsi = moving_avg_gains.copy()
-    rsi *= 0
+    avg_gains = moving_avg_gains.to_numpy(dtype=float)
+    avg_losses = moving_avg_losses.to_numpy(dtype=float)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rsi = np.where(avg_losses == 0, 100.0, 100 - (100 / (1 + avg_gains / avg_losses)))
 
-    for index in range(rsi_len):
-        if moving_avg_losses.iloc[index] == 0:
-            rsi.iloc[index] = 100
-        else:
-            relative_strength = moving_avg_gains.iloc[index] / moving_avg_losses.iloc[index]
-            rsi.iloc[index] = 100 - (100 / (1 + relative_strength))
-
-    return rsi
+    return pd.Series(rsi, index=moving_avg_gains.index, name=moving_avg_gains.name)
 
 
 @plot_function
